@@ -485,9 +485,10 @@ const RGN_MAIN: usize = 0;
 #[cfg(not(feature = "has-psram"))]
 const RGN_RECL: usize = 1;
 
-/// Log per-region free heap at boot / app-enter. The framebuffer must come from
-/// ONE region, so total-free (HEAP.free()) can read fine while the main region
-/// alone is short. Addressed via [`RGN_MAIN`] / [`RGN_RECL`] rather than by raw
+/// Log per-region free heap at boot / app-enter. Any single allocation must come
+/// from ONE region, so total-free (HEAP.free()) can read fine while each region
+/// alone is short. (The games framebuffer is now ~3.3 KB strips for exactly this
+/// reason, see `drivers/framebuffer.rs`.) Addressed via [`RGN_MAIN`] / [`RGN_RECL`] rather than by raw
 /// pool (dram2_seg), in declaration order of the two `heap_allocator!` calls in
 /// `main()` — read the sizes THERE, not from a number copied into this comment.
 ///
@@ -1383,6 +1384,11 @@ async fn main(_spawner: Spawner) -> ! {
     let mut shell = ShellUi::new();
     heap_span("ShellUi::new", &mark_scene);
     println!("[SLINT] shell up");
+    // "RAM busy" fix: grow Slint's render cache now, while main has room, so the
+    // first launcher open can't park 16 KB in the reclaimed pool the games
+    // framebuffer needs. See ShellUi::prewarm_render_cache.
+    shell.prewarm_render_cache(&mut display);
+    log_heap("render-cache prewarm");
 
     // The ~201KB RGB332 framebuffer must NOT be resident while the Slint scene
     // is: the C6's SRAM can't hold both, so allocating it at boot OOM-panics.
@@ -6986,15 +6992,27 @@ async fn main(_spawner: Spawner) -> ! {
                         // margin is much thinner than when that was written (the main
                         // pool is 186KB now, not 240KB — see the heap_allocator! call
                         // and #75), so treat the fallible alloc below as load-bearing
-                        // rather than a formality. We still close the launcher
-                        // and drop the scene here (kept as heap headroom; post-ship
-                        // task #37 may remove it), then allocate the fb fallibly. The
-                        // failure path (now practically impossible) recreates the
-                        // scene and stays put with a toast.
+                        // rather than a formality.
+                        //
+                        // "RAM busy" fix: suspend_scene() only PARKS the scene since
+                        // #66, so it frees nothing ("pre-drop" and "post-drop" read
+                        // identical). The headroom has to come from the launcher.
+                        // set_launcher_open(false) above only flips a property: the
+                        // `if root.launcher-open` instance (~33 KB of Slint bindings,
+                        // measured with heap-hooks) is dropped when Slint next
+                        // evaluates the tree, which is a render. Without this
+                        // render, the fb was allocated with the launcher still
+                        // resident: ~180 B left in main, 10 KB of spill into
+                        // reclaimed, ~2.6 KB free on the whole heap during the game.
+                        // Dropping a conditional overlay is the normal close path (a
+                        // swipe does it), not the whole-scene teardown #66 forbids.
+                        // Cost: the watchface shows for one frame before the game.
                         if toast_active {
                             shell.set_toast("");
                             toast_active = false;
                         }
+                        log_heap("pre-fb pre-close");
+                        shell.render(&mut display);
                         log_heap("pre-fb pre-drop");
                         shell.suspend_scene();
                         log_heap("pre-fb post-drop");
@@ -7050,8 +7068,8 @@ async fn main(_spawner: Spawner) -> ! {
                                 app_state = target;
                             }
                             None => {
-                                // Even with the scene freed the fb won't fit —
-                                // recreate the scene, stay in the shell, and toast.
+                                // Even with the launcher closed the fb strips won't
+                                // fit — un-park the scene, stay in the shell, and toast.
                                 // The reset guards force a repopulate over the next
                                 // ticks.
                                 shell.resume_scene();
@@ -7061,6 +7079,7 @@ async fn main(_spawner: Spawner) -> ! {
                                 if let Some(dt) = last_dt.as_ref() {
                                     let _ = shell.set_time(dt);
                                 }
+                                log_heap("RAM busy");
                                 shell.set_toast("RAM busy \u{2014} try again");
                                 toast_active = true;
                                 toast_until = now + Duration::from_secs(3);

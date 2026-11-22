@@ -28,7 +28,15 @@ const HEIGHT: usize = board::LCD_HEIGHT as usize;
 // even (410x502) so the /2 is exact.
 const FB_WIDTH: usize = WIDTH / 2;
 const FB_HEIGHT: usize = HEIGHT / 2;
-const FB_PIXEL_COUNT: usize = FB_WIDTH * FB_HEIGHT;
+// The store is split into horizontal STRIPS, each its own allocation, instead
+// of one ~51 KB block ("RAM busy" fix). The only heap region that can hold
+// ~51 KB in one piece is the reclaimed pool, and any long-lived allocation the
+// shredded main pool spills into it (a launcher open leaves ~2 KB behind) splits
+// its free space: measured 63,488 B free in reclaimed and still no 51,455 B
+// hole. A ~3.3 KB strip fits into almost any gap, in either pool, for the same
+// total bytes. 16 rows makes the strip index a shift.
+const STRIP_ROWS: usize = 16;
+const N_STRIPS: usize = FB_HEIGHT.div_ceil(STRIP_ROWS);
 
 #[inline(always)]
 fn rgb565_to_332(raw: u16) -> u8 {
@@ -57,23 +65,39 @@ const LUT_332_TO_565: [u16; 256] = {
 };
 
 pub struct Framebuffer {
-    /// Half-res RGB332 backing store (FB_WIDTH * FB_HEIGHT bytes).
-    buf: Vec<u8>,
+    /// Half-res RGB332 backing store (FB_WIDTH * FB_HEIGHT bytes), as
+    /// `N_STRIPS` separately allocated strips of `STRIP_ROWS` rows (the last
+    /// one shorter).
+    strips: Vec<Vec<u8>>,
     /// Scratch for one FULL-width (upscaled) RGB565 panel row during flush.
     row: Vec<u16>,
 }
 
 impl Framebuffer {
     /// Allocate without aborting on OOM: a game grabs ~51KB on entry and the
-    /// shell reclaims it on exit. `None` = the heap can't fit it right now.
+    /// shell reclaims it on exit. `None` = the heap can't fit it right now
+    /// (anything already allocated is dropped on the way out).
     pub fn try_new() -> Option<Self> {
-        let mut buf: Vec<u8> = Vec::new();
-        buf.try_reserve_exact(FB_PIXEL_COUNT).ok()?;
-        buf.resize(FB_PIXEL_COUNT, 0);
+        let mut strips: Vec<Vec<u8>> = Vec::new();
+        strips.try_reserve_exact(N_STRIPS).ok()?;
+        for i in 0..N_STRIPS {
+            let rows = core::cmp::min(STRIP_ROWS, FB_HEIGHT - i * STRIP_ROWS);
+            let mut s: Vec<u8> = Vec::new();
+            s.try_reserve_exact(rows * FB_WIDTH).ok()?;
+            s.resize(rows * FB_WIDTH, 0);
+            strips.push(s);
+        }
         let mut row: Vec<u16> = Vec::new();
         row.try_reserve_exact(WIDTH).ok()?;
         row.resize(WIDTH, 0);
-        Some(Self { buf, row })
+        Some(Self { strips, row })
+    }
+
+    /// One half-res row of the store, mutably.
+    #[inline(always)]
+    fn fb_row_mut(&mut self, fy: usize) -> &mut [u8] {
+        let off = (fy % STRIP_ROWS) * FB_WIDTH;
+        &mut self.strips[fy / STRIP_ROWS][off..off + FB_WIDTH]
     }
 
     /// Flush the whole frame to the panel: expand RGB332 -> RGB565 and
@@ -84,8 +108,11 @@ impl Framebuffer {
         display.bus_mut().begin_pixels();
         for y in 0..HEIGHT {
             let fb_y = y / 2; // 0..FB_HEIGHT (exact: HEIGHT is even)
-            let src = &self.buf[fb_y * FB_WIDTH..(fb_y + 1) * FB_WIDTH];
             // Double each source pixel horizontally into the full-width row.
+            // (Index the strip directly: a `&self` row helper would borrow all
+            // of `self` while `self.row` is written.)
+            let off = (fb_y % STRIP_ROWS) * FB_WIDTH;
+            let src = &self.strips[fb_y / STRIP_ROWS][off..off + FB_WIDTH];
             for (fx, &c) in src.iter().enumerate() {
                 let px = LUT_332_TO_565[c as usize];
                 self.row[2 * fx] = px;
@@ -117,7 +144,7 @@ impl DrawTarget for Framebuffer {
             if coord.x >= 0 && coord.x < WIDTH as i32 && coord.y >= 0 && coord.y < HEIGHT as i32 {
                 let fx = coord.x as usize / 2;
                 let fy = coord.y as usize / 2;
-                self.buf[fy * FB_WIDTH + fx] = rgb565_to_332(RawU16::from(color).into_inner());
+                self.fb_row_mut(fy)[fx] = rgb565_to_332(RawU16::from(color).into_inner());
             }
         }
         Ok(())
@@ -146,7 +173,7 @@ impl DrawTarget for Framebuffer {
             if x >= 0 && x < WIDTH as i32 && y >= 0 && y < HEIGHT as i32 {
                 let fx = x as usize / 2;
                 let fy = y as usize / 2;
-                self.buf[fy * FB_WIDTH + fx] = rgb565_to_332(RawU16::from(color).into_inner());
+                self.fb_row_mut(fy)[fx] = rgb565_to_332(RawU16::from(color).into_inner());
             }
             i += 1;
         }
@@ -173,7 +200,7 @@ impl DrawTarget for Framebuffer {
         let fby0 = y / 2;
         let fby1 = y_end.div_ceil(2).min(FB_HEIGHT);
         for fbrow in fby0..fby1 {
-            self.buf[fbrow * FB_WIDTH + fbx0..fbrow * FB_WIDTH + fbx1].fill(c);
+            self.fb_row_mut(fbrow)[fbx0..fbx1].fill(c);
         }
         Ok(())
     }

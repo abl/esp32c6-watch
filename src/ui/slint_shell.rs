@@ -2184,6 +2184,53 @@ impl ShellUi {
         self.window.window().request_redraw();
     }
 
+    /// Pre-grow Slint's partial-render cache at boot, while the main heap pool
+    /// still has room for it ("RAM busy" fix).
+    ///
+    /// `PartialRendererCache` (i-slint-core `partial_renderer.rs`) is a slab
+    /// holding one 32 B entry per item drawn, grown by doubling and never
+    /// shrunk. The watchface alone fits in 256 entries (8 KB). Opening the
+    /// launcher on top of it crosses 256, so the slab reallocs to 16,384 B. At
+    /// runtime the main pool is in sub-16 B crumbs (`maxblk_main=0`), so that
+    /// 16 KB block lands at the base of the RECLAIMED pool and stays there
+    /// forever. Reclaimed is the only region that can hold the 51,455 B games
+    /// framebuffer, and 65,536 - 16,384 = 49,152 < 51,455, so every launch from
+    /// then on fails with "RAM busy". Captured on glass with a heap-hooks
+    /// backtrace: `PartialRendererCache::insert -> RawVec::grow_one -> realloc`
+    /// returning 0x4086e610, the reclaimed pool's first byte.
+    ///
+    /// Here, before the WiFi stack shreds main, we draw the watchface and then
+    /// stack the launcher, shade and switcher on top of it. Entries for items
+    /// that are still alive are kept even while they are covered, so the live
+    /// count crosses 256 and the doubling happens now, inside main. Watchface
+    /// plus launcher alone stays at or under 256 at boot (measured: only the
+    /// 8 KB rung fired); on a running watch it crosses, hence the extra layers.
+    /// Closing the overlays frees their entries but not the slab's capacity, so
+    /// later launcher opens reuse it and reclaimed stays whole for the
+    /// framebuffer. Net cost: 8 KB of main that the first launcher open would
+    /// have taken anyway (and from the wrong pool).
+    ///
+    /// The panel is blanked right after this, so the overlays are visible for
+    /// at most a few frames during boot.
+    pub fn prewarm_render_cache(&mut self, display: &mut ActivePanel) {
+        let Some(ui) = self.ui.as_ref().map(|u| u.clone_strong()) else { return; };
+        let mut paint = |s: &mut Self| {
+            s.request_redraw();
+            s.render(display);
+        };
+        paint(self);
+        ui.set_launcher_open(true);
+        paint(self);
+        ui.set_shade_open(true);
+        paint(self);
+        ui.set_switcher_open(true);
+        paint(self);
+        ui.set_switcher_open(false);
+        ui.set_shade_open(false);
+        ui.set_launcher_open(false);
+        paint(self);
+    }
+
     /// Run timers/animations and repaint if the scene is dirty. No-op while the
     /// scene is suspended (a game owns the panel via the framebuffer).
     /// Start/stop a scene cast (feature `cast`). `start` allocates the cell

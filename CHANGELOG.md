@@ -6,8 +6,25 @@ follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
-*Tooling and docs, plus one firmware change (#108, the roamer guard below); fold into the next
-release heading.*
+*Tooling and docs, plus two firmware changes (the "RAM busy" launch fix and #108, the roamer
+guard, below); fold into the next release heading.*
+
+- **Games no longer fail to launch with "RAM busy".** After the launcher had been opened once,
+  every game launch failed until reboot. Three causes, each measured on glass with `heap-hooks`:
+  1. Opening the launcher grew Slint's `PartialRendererCache` slab from 8 KB to 16 KB. With the
+     main pool shredded, that 16 KB landed at the base of the reclaimed pool and never left,
+     leaving 49,152 B where the 51,455 B games framebuffer needs to fit. The cache is now grown
+     at boot (`ShellUi::prewarm_render_cache`), while main still has room for it.
+  2. Since #66, `suspend_scene()` parks the scene and frees nothing, so the launcher's ~34 KB was
+     still resident when the framebuffer was allocated. Closing the launcher only flips a
+     property; the launch path now renders one frame first so Slint actually drops it. The
+     watchface shows for one frame before the game.
+  3. Even then, leftovers from the launcher fragmented the reclaimed pool (63 KB free, no 51 KB
+     hole). The framebuffer is now 16 separately allocated strips of ~3.3 KB (same total size),
+     so any gaps will do.
+  Result: 6/6 launches across Snake, Tetris and Flappy with 17-37 KB of heap left in game (was:
+  every launch failing, and ~2.6 KB left when one did get through). A failed launch now logs a
+  `[HEAP] RAM busy:` line.
 
 - **The roamer leaves an AP that gives no lease or reaches nothing (#108, follow-up to #89).**
   Associated with no DHCP lease for 20 s is now a failed attempt (backoff, and that BSSID is
