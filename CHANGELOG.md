@@ -6,8 +6,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
-*Tooling and docs, plus two firmware changes (the "RAM busy" launch fix and #108, the roamer
-guard, below); fold into the next release heading.*
+*Tooling and docs, plus three firmware changes (the 12-hour clock, the "RAM busy" launch fix and
+#108, the roamer guard, below); fold into the next release heading.*
+
+- **12-hour clock.** The watchface shows `9:05` / `1:30` instead of `09:05` / `13:30` (no AM/PM
+  on the face: the 108px clock font is trimmed to digits). The mesh ping note reads
+  "… · 1:30 PM".
 
 - **Games no longer fail to launch with "RAM busy".** After the launcher had been opened once,
   every game launch failed until reboot. Three causes, each measured on glass with `heap-hooks`:

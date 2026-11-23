@@ -4335,8 +4335,10 @@ async fn main(_spawner: Spawner) -> ! {
                                         Some(dt) => {
                                             let _ = write!(
                                                 body,
-                                                "A greeting across the mesh \u{00b7} {:02}:{:02}:{:02}",
-                                                dt.hours, dt.minutes, dt.seconds
+                                                "A greeting across the mesh \u{00b7} {}:{:02} {}",
+                                                slint_shell::hour12(dt.hours),
+                                                dt.minutes,
+                                                slint_shell::am_pm(dt.hours)
                                             );
                                         }
                                         None => {

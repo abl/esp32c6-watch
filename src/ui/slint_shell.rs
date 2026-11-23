@@ -34,6 +34,19 @@ pub const PAGE_MESH: i32 = 4;
 pub const PAGE_COUNT: i32 = PAGE_MESH + 1;
 
 const WEEKDAYS: [&str; 7] = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+
+/// 24-hour RTC hour (0-23) to a 12-hour clock hour (1-12): 0 -> 12, 13 -> 1.
+pub fn hour12(hours: u8) -> u8 {
+    match hours % 12 {
+        0 => 12,
+        h => h,
+    }
+}
+
+/// "AM" / "PM" for a 24-hour RTC hour.
+pub fn am_pm(hours: u8) -> &'static str {
+    if hours < 12 { "AM" } else { "PM" }
+}
 const MONTHS: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
 ];
@@ -1035,7 +1048,10 @@ impl ShellUi {
         }
         self.last_second = dt.seconds;
         let Some(ui) = self.ui.as_ref() else { return true; };
-        ui.set_time_text(slint::format!("{:02}:{:02}", dt.hours, dt.minutes));
+        // 12-hour clock, no leading zero ("9:05", "12:30"). No AM/PM on the face:
+        // the 108px clock font is trimmed to digits for ROM, and the text is
+        // centred, so a shorter "9:05" needs no layout change.
+        ui.set_time_text(slint::format!("{}:{:02}", hour12(dt.hours), dt.minutes));
         let weekday = WEEKDAYS[(dt.weekday % 7) as usize];
         let month = MONTHS[(dt.month.clamp(1, 12) - 1) as usize];
         ui.set_date_text(slint::format!(
